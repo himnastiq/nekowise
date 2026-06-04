@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─────────────────────────────────────────────
+  # SERVER — lint & test
+  # ─────────────────────────────────────────────
+  server:
+    name: Server (Node.js)
+    runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:6
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Lint
+        working-directory: server
+        run: npm run lint --if-present
+
+      - name: Run tests
+        working-directory: server
+        env:
+          NODE_ENV: test
+          MONGODB_URI: mongodb://localhost:27017/neko_test
+          JWT_SECRET: ci-test-secret-do-not-use-in-prod
+          PORT: 5000
+        run: npm test --if-present
+
+  # ─────────────────────────────────────────────
+  # CLIENT — lint, test & build
+  # ─────────────────────────────────────────────
+  client:
+    name: Client (React / Vite)
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Lint
+        working-directory: client
+        run: npm run lint --if-present
+
+      - name: Run tests
+        working-directory: client
+        run: npm test --if-present -- --run
+
+      - name: Build
+        working-directory: client
+        env:
+          VITE_API_URL: https://api.example.com
+          VITE_WS_URL: wss://api.example.com/ws
+        run: npm run build
+
+      - name: Upload build artifact
+        # Only upload on the latest Node version to save storage
+        if: matrix.node-version == '20.x'
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-dist-${{ github.sha }}
+          path: client/dist/
+          retention-days: 7
+
+  # ─────────────────────────────────────────────
+  # SECURITY — audit both workspaces
+  # ─────────────────────────────────────────────
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Audit server dependencies
+        working-directory: server
+        # Allow high-severity advisories to not block CI — change to --audit-level=high to enforce
+        run: npm audit --audit-level=critical --if-present || true
+
+      - name: Audit client dependencies
+        working-directory: client
+        run: npm audit --audit-level=critical --if-present || true

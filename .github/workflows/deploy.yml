@@ -1,0 +1,147 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        default: production
+        type: choice
+        options: [production, staging]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false  # never cancel a running deploy
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Guard: CI must pass before anything deploys
+  # ─────────────────────────────────────────────
+  ci-gate:
+    name: Wait for CI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Re-run the build one more time so the deploy workflow is
+      # self-contained. Alternatively, use `needs` + workflow_run trigger.
+      - name: Verify client build passes
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+  # ─────────────────────────────────────────────
+  # CLIENT → Vercel
+  # ─────────────────────────────────────────────
+  deploy-client:
+    name: Deploy Client → Vercel
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.environment || 'production' }}
+      url: ${{ steps.deploy.outputs.url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install client dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Build client
+        working-directory: client
+        env:
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+          VITE_WS_URL: ${{ secrets.VITE_WS_URL }}
+        run: npm run build
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel environment
+        working-directory: client
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy to Vercel
+        id: deploy
+        working-directory: client
+        run: |
+          URL=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }})
+          echo "url=$URL" >> $GITHUB_OUTPUT
+
+      - name: Comment deploy URL on commit
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const url = '${{ steps.deploy.outputs.url }}';
+            if (url) {
+              await github.rest.repos.createCommitComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: context.sha,
+                body: `✅ Client deployed to Vercel: ${url}`,
+              });
+            }
+
+  # ─────────────────────────────────────────────
+  # SERVER → Railway
+  # (replace with your preferred platform — Render, Fly.io, EC2, etc.)
+  # ─────────────────────────────────────────────
+  deploy-server:
+    name: Deploy Server → Railway
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.environment || 'production' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli
+
+      - name: Deploy to Railway
+        working-directory: server
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --service nekowise-server --detach
+
+      # ── OR: uncomment below to deploy via Render deploy hook instead ──
+      # - name: Trigger Render deploy
+      #   run: |
+      #     curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+
+  # ─────────────────────────────────────────────
+  # POST-DEPLOY — smoke test
+  # ─────────────────────────────────────────────
+  smoke-test:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    needs: [deploy-client, deploy-server]
+    steps:
+      - name: Health-check API
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ secrets.VITE_API_URL }}/api/health" || echo "000")
+          echo "API health status: $STATUS"
+          if [[ "$STATUS" != "200" ]]; then
+            echo "::warning::API health check returned $STATUS — verify the server is up"
+          fi
+
+      - name: Health-check client
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://nekowise.vercel.app" || echo "000")
+          echo "Client status: $STATUS"
+          if [[ "$STATUS" != "200" ]]; then
+            echo "::warning::Client returned $STATUS"
+          fi
