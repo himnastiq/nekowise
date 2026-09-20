@@ -64,7 +64,7 @@ class AudioMonitor {
     if (audioContext && audioContext.state !== "closed") {
       try {
         await audioContext.close(); // MEM-002: Await the async close
-      } catch (e) {
+      } catch {
         // Already closed or in invalid state — safe to ignore
       }
       this.audioContexts.delete(userId);

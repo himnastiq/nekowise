@@ -19,7 +19,7 @@ export function AuthProvider({ children }) {
       // SEC-001: Cookie is sent automatically via credentials:'include' in api.js
       const response = await api.getMe();
       setUser(response.user);
-    } catch (error) {
+    } catch {
       // No valid session — user is not authenticated
       setUser(null);
     } finally {
