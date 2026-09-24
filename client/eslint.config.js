@@ -30,4 +30,10 @@ export default defineConfig([
       ],
     },
   },
+  {
+    files: ['vite.config.js'],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
 ])
