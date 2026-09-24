@@ -35,11 +35,84 @@ jobs:
           node-version: 20.x
 
   # ─────────────────────────────────────────────
-  # CLIENT → Vercel
+  # DOCKER — Build & Push Images to GHCR
+  # ─────────────────────────────────────────────
+  docker-publish:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    needs: [ci-gate]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Server Image ──
+      - name: Docker meta (server)
+        id: meta-server
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/server
+          tags: |
+            type=sha
+            type=raw,value=latest
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build & Push Server Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          target: production
+          push: true
+          tags: ${{ steps.meta-server.outputs.tags }}
+          labels: ${{ steps.meta-server.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Client Image ──
+      - name: Docker meta (client)
+        id: meta-client
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/client
+          tags: |
+            type=sha
+            type=raw,value=latest
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build & Push Client Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./client
+          target: production
+          push: true
+          tags: ${{ steps.meta-client.outputs.tags }}
+          labels: ${{ steps.meta-client.outputs.labels }}
+          build-args: |
+            VITE_API_URL=${{ secrets.VITE_API_URL }}
+            VITE_WS_URL=${{ secrets.VITE_WS_URL }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─────────────────────────────────────────────
+  # CLIENT → Vercel (Static Hosting)
   # ─────────────────────────────────────────────
   deploy-client:
     name: Deploy Client → Vercel
     runs-on: ubuntu-latest
+    needs: [docker-publish]
     environment:
       name: ${{ github.event.inputs.environment || 'production' }}
       url: ${{ steps.deploy.outputs.url }}
@@ -95,32 +168,44 @@ jobs:
             }
 
   # ─────────────────────────────────────────────
-  # SERVER → Railway
-  # (replace with your preferred platform — Render, Fly.io, EC2, etc.)
+  # SERVER → Render (Docker Web Service)
+  # ─────────────────────────────────────────────
+  # Prerequisites:
+  #   1. Create a Web Service on Render (https://dashboard.render.com)
+  #      - Connect your GitHub repo
+  #      - Set Dockerfile path: ./server/Dockerfile
+  #      - Set Docker context: ./server
+  #   2. Create a Deploy Hook in Render dashboard → Settings → Deploy Hook
+  #   3. Add the hook URL as RENDER_DEPLOY_HOOK_URL secret in GitHub
+  #   4. Set environment variables in Render dashboard:
+  #      - MONGODB_URI (your MongoDB Atlas connection string)
+  #      - All other env vars from .env.example
   # ─────────────────────────────────────────────
   deploy-server:
-    name: Deploy Server → Railway
+    name: Deploy Server → Render
     runs-on: ubuntu-latest
+    needs: [docker-publish]
     environment:
       name: ${{ github.event.inputs.environment || 'production' }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Railway CLI
-        run: npm install --global @railway/cli
-
-      - name: Deploy to Railway
-        working-directory: server
+      - name: Trigger Render Deploy
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: railway up --service nekowise-server --detach
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo "::warning::RENDER_DEPLOY_HOOK_URL secret not set — skipping Render deploy"
+            echo "Set up a Deploy Hook in Render dashboard and add it as a GitHub secret"
+            exit 0
+          fi
 
-      # ── OR: uncomment below to deploy via Render deploy hook instead ──
-      # - name: Trigger Render deploy
-      #   run: |
-      #     curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+          echo "🚀 Triggering Render deployment..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$RENDER_DEPLOY_HOOK_URL")
+          echo "Render deploy hook response: HTTP $STATUS"
+
+          if [ "$STATUS" != "200" ] && [ "$STATUS" != "201" ]; then
+            echo "::warning::Render deploy hook returned HTTP $STATUS"
+          fi
 
   # ─────────────────────────────────────────────
   # POST-DEPLOY — smoke test
@@ -130,9 +215,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: [deploy-client, deploy-server]
     steps:
+      - name: Wait for deployment to stabilize
+        run: sleep 30
+
       - name: Health-check API
         run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ secrets.VITE_API_URL }}/api/health" || echo "000")
+          API_URL="${{ secrets.VITE_API_URL }}"
+          if [ -z "$API_URL" ]; then
+            echo "::warning::VITE_API_URL not set — skipping API health check"
+            exit 0
+          fi
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${API_URL}/health" || echo "000")
           echo "API health status: $STATUS"
           if [[ "$STATUS" != "200" ]]; then
             echo "::warning::API health check returned $STATUS — verify the server is up"

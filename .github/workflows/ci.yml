@@ -134,3 +134,89 @@ jobs:
       - name: Audit client dependencies
         working-directory: client
         run: npm audit --audit-level=critical --if-present || true
+
+  # ─────────────────────────────────────────────
+  # DOCKER — build & integration test
+  # ─────────────────────────────────────────────
+  docker:
+    name: Docker Build & Integration Test
+    runs-on: ubuntu-latest
+    needs: [server, client]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create .env.docker for compose
+        run: |
+          cat > .env.docker << 'EOF'
+          NODE_ENV=production
+          PORT=5000
+          MONGODB_URI=mongodb://mongo:27017/nekowise
+          JWT_SECRET=ci-integration-test-secret-minimum-32-chars!!
+          JWT_REFRESH_SECRET=ci-integration-refresh-secret-min-32-chars!!
+          JWT_EXPIRE=7d
+          JWT_REFRESH_EXPIRE=30d
+          CLIENT_URL=http://localhost
+          LOG_LEVEL=info
+          EOF
+
+      - name: Build all Docker images
+        run: docker compose build
+
+      - name: Start full stack
+        run: |
+          docker compose up -d
+          echo "⏳ Waiting for services to stabilize..."
+
+      - name: Wait for MongoDB
+        run: |
+          for i in $(seq 1 15); do
+            if docker compose exec -T mongo mongosh --eval "db.runCommand({ping:1})" > /dev/null 2>&1; then
+              echo "✅ MongoDB is ready"
+              break
+            fi
+            echo "  Attempt $i/15 — waiting for MongoDB..."
+            sleep 3
+          done
+
+      - name: Wait for server
+        run: |
+          for i in $(seq 1 20); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/api/health 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Server is healthy"
+              curl -s http://localhost:5000/api/health | head -1
+              break
+            fi
+            echo "  Attempt $i/20 — server returned $STATUS"
+            sleep 5
+          done
+          [ "$STATUS" = "200" ] || (echo "❌ Server failed to start" && exit 1)
+
+      - name: Health check — Client (Nginx)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80)
+          echo "Client HTTP status: $STATUS"
+          [ "$STATUS" = "200" ] || [ "$STATUS" = "304" ]
+
+      - name: Health check — API via Nginx proxy
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80/api/health)
+          echo "API via Nginx proxy status: $STATUS"
+          [ "$STATUS" = "200" ]
+
+      - name: Show container status
+        if: always()
+        run: docker compose ps
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs --tail=100
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

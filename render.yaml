@@ -1,0 +1,80 @@
+# ============================================
+# Nekowise — Render Blueprint (render.yaml)
+# ============================================
+# Deploy this app to Render with:
+#   1. Push this file to your GitHub repo
+#   2. Go to https://dashboard.render.com/blueprints
+#   3. Connect your repo → Render auto-detects this file
+#
+# Prerequisites:
+#   - MongoDB Atlas database (Render doesn't offer managed MongoDB)
+#   - Set MONGODB_URI in the Render dashboard after deploy
+# ============================================
+
+services:
+  # ── Server — Docker Web Service ─────────────
+  - type: web
+    name: nekowise-server
+    runtime: docker
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "5000"
+      - key: MONGODB_URI
+        sync: false  # Set manually in Render dashboard (MongoDB Atlas URI)
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: JWT_EXPIRE
+        value: 7d
+      - key: JWT_REFRESH_EXPIRE
+        value: 30d
+      - key: CLIENT_URL
+        fromService:
+          type: web
+          name: nekowise-client
+          property: hostport
+          # Format: https://nekowise-client.onrender.com
+      - key: LOG_LEVEL
+        value: info
+
+  # ── Client — Static Site ────────────────────
+  - type: web
+    name: nekowise-client
+    runtime: static
+    buildCommand: cd client && npm ci && npm run build
+    staticPublishPath: ./client/dist
+    pullPolicy: always
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: SAMEORIGIN
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
+    routes:
+      # SPA fallback — serve index.html for all client-side routes
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: nekowise-server
+          property: hostport
+          # Will be set to https://nekowise-server.onrender.com
+          # Append /api in your client code or update after deploy
+      - key: VITE_WS_URL
+        sync: false  # Set manually: wss://nekowise-server.onrender.com/ws
+      - key: NODE_VERSION
+        value: "20"

@@ -1,12 +1,11 @@
 # Dependencies
 node_modules/
-package-lock.json
-yarn.lock
 
 # Environment variables
 .env
 .env.local
 .env.production
+.env.docker.local
 
 # Build outputs
 dist/
@@ -31,4 +30,7 @@ Thumbs.db
 coverage/
 .nyc_output/
 
-code_audit_prompt.md
+# Docker (local overrides only — Dockerfiles and compose are tracked)
+.env.docker.local
+
+code_audit_prompt.md
