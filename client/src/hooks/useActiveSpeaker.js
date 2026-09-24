@@ -85,7 +85,7 @@ export function useActiveSpeaker(participants, localStream, remoteStreams) {
     // Clean up volumeHistory for departed users
     const currentIds = new Set([
       "local",
-      ...remoteStreams.map((s) => s.userId),
+      ...Array.from(remoteStreams.values()).map((s) => s.userId),
     ]);
     volumeHistory.current.forEach((_, userId) => {
       if (!currentIds.has(userId)) {
